@@ -9,60 +9,71 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unpack the newest source ZIP when one is present
+      - name: Find and unpack source ZIP
         shell: bash
         run: |
-          # Prefer the highest versioned updated source archive.
-          archive="$(find . -maxdepth 1 -type f -iname '*mod-source*updated-*.zip' -printf '%f\n' | sort -V | tail -n 1)"
-          if [ -z "$archive" ]; then
-            archive="$(find . -maxdepth 1 -type f -iname '*mod-source*.zip' -printf '%f\n' | sort -V | tail -n 1)"
-          fi
+          set -euo pipefail
 
-          if [ -n "$archive" ]; then
-            echo "Extracting newest source archive: $archive"
-            rm -rf /tmp/sitandwatch-source
-            mkdir -p /tmp/sitandwatch-source
-            unzip -q -o "$archive" -d /tmp/sitandwatch-source
-            build_file="$(find /tmp/sitandwatch-source -maxdepth 6 -type f -name build.gradle -print -quit)"
-            if [ -z "$build_file" ]; then
-              echo "The selected ZIP does not contain build.gradle." >&2
+          if [ -f "$GITHUB_WORKSPACE/build.gradle" ]; then
+            project_root="$GITHUB_WORKSPACE"
+          else
+            mapfile -t archives < <(
+              find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' \
+                ! -path '*/.git/*' ! -path '*/.github/*' | sort -V
+            )
+
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "ERROR: No source ZIP found in repository."
               exit 1
             fi
+
+            archive="${archives[${#archives[@]}-1]}"
+            echo "Extracting: $archive"
+
+            extract_dir="$RUNNER_TEMP/sitandwatch-source"
+            rm -rf "$extract_dir"
+            mkdir -p "$extract_dir"
+
+            unzip -q -o "$archive" -d "$extract_dir"
+
+            build_file="$(find "$extract_dir" -type f -name build.gradle -print -quit)"
+
+            if [ -z "$build_file" ]; then
+              echo "ERROR: build.gradle not found in ZIP."
+              exit 1
+            fi
+
             project_root="$(dirname "$build_file")"
-            rm -rf src
-            shopt -s dotglob nullglob
-            for item in "$project_root"/*; do
-              [ -e "$item" ] || continue
-              cp -a "$item" .
-            done
           fi
 
-          test -f build.gradle
-          test -d src/main/java
-          echo "Project root ready:"
-          ls -la
+          if [ ! -d "$project_root/src" ]; then
+            echo "ERROR: src folder not found."
+            exit 1
+          fi
 
-      - name: Set up JDK 17 (Temurin) with Gradle cache
+          echo "PROJECT_DIR=$project_root" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
       - name: Set up Gradle 8.1.1
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: '8.1.1'
 
-      - name: Build
+      - name: Build mod
+        working-directory: ${{ env.PROJECT_DIR }}
         run: gradle build --no-daemon
 
-      - name: Upload mod jar
+      - name: Upload mod JAR
         uses: actions/upload-artifact@v4
         with:
           name: sitandwatch-jar
-          path: build/libs/*.jar
+          path: ${{ env.PROJECT_DIR }}/build/libs/*.jar
           if-no-files-found: error
