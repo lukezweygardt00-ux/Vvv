@@ -8,11 +8,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and unpack source ZIP
+      - name: Find and extract mod source
         shell: bash
         run: |
           set -euo pipefail
@@ -21,12 +22,19 @@ jobs:
             project_root="$GITHUB_WORKSPACE"
           else
             mapfile -t archives < <(
-              find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' \
-                ! -path '*/.git/*' ! -path '*/.github/*' | sort -V
+              find "$GITHUB_WORKSPACE" -maxdepth 1 -type f \
+                -iname 'sitandwatch-mod-source*.zip' | sort -V
             )
 
             if [ "${#archives[@]}" -eq 0 ]; then
-              echo "ERROR: No source ZIP found in repository."
+              mapfile -t archives < <(
+                find "$GITHUB_WORKSPACE" -maxdepth 1 -type f \
+                  -iname '*.zip' | sort -V
+              )
+            fi
+
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "ERROR: No source ZIP found in repository root."
               exit 1
             fi
 
@@ -39,22 +47,61 @@ jobs:
 
             unzip -q -o "$archive" -d "$extract_dir"
 
-            build_file="$(find "$extract_dir" -type f -name build.gradle -print -quit)"
+            project_root=""
 
-            if [ -z "$build_file" ]; then
-              echo "ERROR: build.gradle not found in ZIP."
+            while IFS= read -r build_file; do
+              candidate="$(dirname "$build_file")"
+              if [ -d "$candidate/src" ]; then
+                project_root="$candidate"
+                break
+              fi
+            done < <(find "$extract_dir" -type f -name build.gradle)
+
+            if [ -z "$project_root" ]; then
+              echo "ERROR: Could not find a valid Gradle project."
               exit 1
             fi
-
-            project_root="$(dirname "$build_file")"
           fi
 
-          if [ ! -d "$project_root/src" ]; then
-            echo "ERROR: src folder not found."
-            exit 1
-          fi
-
+          echo "Project directory: $project_root"
           echo "PROJECT_DIR=$project_root" >> "$GITHUB_ENV"
+
+      - name: Fix Minecraft 1.20.1 sound calls
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - "$PROJECT_DIR/src/main/java/com/sitandwatch/event/ForgeEvents.java" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+
+          if not path.is_file():
+              raise SystemExit(f"ERROR: Missing Java file: {path}")
+
+          source = path.read_text(encoding="utf-8")
+
+          pattern = (
+              r'(\.playSound\(\s*SoundEvents\.CHEST_LOCKED)'
+              r'\s*,\s*SoundSource\.BLOCKS'
+              r'\s*,\s*0\.8f\s*,\s*0\.8f\s*\);'
+          )
+
+          fixed, count = re.subn(
+              pattern,
+              r'\1, 0.8f, 0.8f);',
+              source
+          )
+
+          path.write_text(fixed, encoding="utf-8")
+
+          print(f"Fixed {count} incompatible sound calls.")
+
+          if "SoundEvents.CHEST_LOCKED, SoundSource.BLOCKS" in fixed:
+              raise SystemExit("ERROR: An incompatible sound call remains.")
+          PY
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
