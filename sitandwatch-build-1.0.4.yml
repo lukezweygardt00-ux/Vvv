@@ -1,0 +1,68 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack the newest source ZIP when one is present
+        shell: bash
+        run: |
+          # Prefer the highest versioned updated source archive (for example 1.0.4 over 1.0.3).
+          archive="$(find . -maxdepth 1 -type f -iname '*mod-source*updated-*.zip' -printf '%f\n' | sort -V | tail -n 1)"
+          if [ -z "$archive" ]; then
+            archive="$(find . -maxdepth 1 -type f -iname '*mod-source*.zip' -printf '%f\n' | sort -V | tail -n 1)"
+          fi
+
+          if [ -n "$archive" ]; then
+            echo "Extracting newest source archive: $archive"
+            rm -rf /tmp/sitandwatch-source
+            mkdir -p /tmp/sitandwatch-source
+            unzip -q -o "$archive" -d /tmp/sitandwatch-source
+            build_file="$(find /tmp/sitandwatch-source -maxdepth 6 -type f -name build.gradle -print -quit)"
+            if [ -z "$build_file" ]; then
+              echo "The selected ZIP does not contain build.gradle." >&2
+              exit 1
+            fi
+            project_root="$(dirname "$build_file")"
+            rm -rf src
+            shopt -s dotglob nullglob
+            for item in "$project_root"/*; do
+              [ -e "$item" ] || continue
+              cp -a "$item" .
+            done
+          fi
+
+          test -f build.gradle
+          test -d src/main/java
+          echo "Project root ready:"
+          ls -la
+
+      - name: Set up JDK 17 (Temurin) with Gradle cache
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle 8.1.1
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.1.1'
+
+      - name: Build
+        run: gradle build --no-daemon
+
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitandwatch-jar
+          path: build/libs/*.jar
+          if-no-files-found: error
